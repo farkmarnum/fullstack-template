@@ -5,6 +5,8 @@ trap cleanup SIGINT SIGTERM ERR
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd -P)
 
+TMP_JSON_FILENAME=".tmp.json"
+
 usage() {
   cat <<EOF
 Usage: $(basename "${BASH_SOURCE[0]}") [-h] [-v]
@@ -112,7 +114,9 @@ msg "
 
 
 ⚠️  Please have the following information ready:
-    - A ${CYAN}${BOLD}domain name${NOFORMAT} that is available to register
+    - One of:
+        - A ${CYAN}${BOLD}domain name${NOFORMAT} that is available to register
+        - A hosting zone id for an already registered domain
     - A Google Analytics ${CYAN}${BOLD}tracking ID${NOFORMAT}
     - Your ${CYAN}${BOLD}contact information${NOFORMAT} (for domain registrar)
 "
@@ -151,7 +155,7 @@ Email=$(qp "Email")
 
 CONTACT_INFO="FirstName=$FirstName,LastName=$LastName,ContactType=$ContactType,AddressLine1=string,AddressLine2=string,City=$City,State=$State,CountryCode=$CountryCode,ZipCode=$ZipCode,Email=$Email"
 
-aws route53domains register-domain \
+REGISTRAR_OPERATION_ID=$(aws route53domains register-domain \
   --profile "$AWS_PROFILE" \
   --domain-name $FRONTEND_DOMAIN \
   --duration-in-years 1 \
@@ -162,43 +166,83 @@ aws route53domains register-domain \
   --privacy-protect-admin-contact \
   --privacy-protect-registrant-contact \
   --privacy-protect-tech-contact \
-  --generate-cli-skeleton
+  | jq .OperationId)
 
-# REGISTRAR_OPERATION_ID=$(aws route53domains register-domain \
-  # --profile "$AWS_PROFILE" \
-  # --domain-name $FRONTEND_DOMAIN \
-  # --duration-in-years 1 \
-  # --auto-renew true \
-  # --admin-contact "$CONTACT_INFO" \
-  # --registrant-contact "$CONTACT_INFO" \
-  # --tech-contact "$CONTACT_INFO" \
-  # --privacy-protect-admin-contact \
-  # --privacy-protect-registrant-contact \
-  # --privacy-protect-tech-contact \
-#   | jq .OperationId)
 
-# msg "\nWaiting for domain registration to complete. Note: this may take up to 15 minutes\n"
+msg "\nWaiting for domain registration to complete. Note: this may take up to 15 minutes\n"
 
-# while true; do
-#     STATUS=$(get-operation-detail --operation-id $REGISTRAR_OPERATION_ID | jq .Status)
-#     if [[ $STATUS == "SUCCESSFUL" ]]
-#     then
-#       echo "Success!"
-#       break
-#     else
-#       printf "."
-#       sleep 15
-#     esac
-# done
+while true; do
+    STATUS=$(aws route53domains get-operation-detail --operation-id $REGISTRAR_OPERATION_ID | jq .Status)
+    if [[ $STATUS == "SUCCESSFUL" ]]
+    then
+      echo "Success!"
+      break
+    else
+      printf "."
+      sleep 15
+    esac
+done
+
+msg "${CYAN}${BOLD}Your domain is registered!${NOFORMAT}\n"
 
 HOSTED_ZONE_ID=$(aws route53 list-hosted-zones-by-name --profile "$AWS_PROFILE" \
   | jq --arg name "${FRONTEND_DOMAIN}." -r '.HostedZones | .[] | select(.Name=="\($name)") | .Id' \
   | sed 's/.*\///')
 
-    # - CERTIFICATE_ARN
+CERTIFICATE_ARN=$(aws acm request-certificate --domain-name $FRONTEND_DOMAIN --validation-method DNS --subject-alternative-names *.$FRONTEND_DOMAIN)
 
-    # - CLOUDFORMATION_ROLE_ARN
+CERT_STATUS_JSON=$(aws acm describe-certificate --certificate-arn $CERTIFICATE_ARN)
+CERT_VALIDATION_DNS_NAME=$(echo $CERT_STATUS_JSON | jq 'DomainValidationOptions[0].ResourceRecord.Name')
+CERT_VALIDATION_DNS_VALUE=$(echo $CERT_STATUS_JSON | jq 'DomainValidationOptions[0].ResourceRecord.Value')
 
-    # - AWS_ACCESS_KEY_ID
-    # - AWS_SECRET_ACCESS_KEY
+echo -e "
+{
+	\"Changes\": [
+		{
+			\"Action\": \"CREATE\",
+			\"ResourceRecordSet\": {
+				\"Name\": \"$CERT_VALIDATION_DNS_NAME.$FRONTEND_DOMAIN\",
+				\"Type\": \"CNAME\",
+				\"TTL\": 300,
+				\"ResourceRecords\": [
+					{
+						\"Value\": \"$CERT_VALIDATION_DNS_VALUE\"
+					}
+				]
+			}
+		}
+	]
+}
+" > $TMP_JSON_FILENAME
 
+aws route53 change-resource-record-sets --hosted-zone-id $HOSTED_ZONE_ID --change-batch file://$TMP_JSON_FILENAME
+
+msg "\nWaiting for certificate validation to complete.\n"
+
+while true; do
+    CERT_STATUS_JSON=$(aws acm describe-certificate --certificate-arn $CERTIFICATE_ARN)
+    STATUS=$(echo $CERT_STATUS_JSON | jq 'DomainValidationOptions[0].ValidationStatus')
+
+    case "$STATUS" in
+    SUCCESS) break ;;
+    PENDING_VALIDATION) printf "." ; sleep 5;;
+    FAILED) die "Validation failed!!!" ;;
+    *) die "Cannot parse ValidationStatus from \"aws route53 describe-certificate \": $1" ;;
+    esac
+done
+
+msg "${CYAN}${BOLD}Certificate validated!${NOFORMAT}\n"
+
+echo "{\"Version\": \"2012-10-17\",\"Statement\": [{\"Sid\": \"\",\"Effect\": \"Allow\",\"Principal\": {\"Service\": \"cloudformation.amazonaws.com\"},\"Action\": \"sts:AssumeRole\"}]}" > $TMP_JSON_FILENAME
+
+aws iam create-role --role-name $STACK_NAME-cloudformation --assume-role-policy-document file://$TMP_JSON_FILENAME
+# get arn from output: Role.Arn -> CLOUDFORMATION_ROLE_ARN
+
+# TODO: echo cloudformation policy > json
+
+create-policy --policy-name $STACK_NAME-cloudformation --policy-document file://$TMP_JSON_FILENAME
+
+# create user for github actions
+# add policies
+# -> AWS_ACCESS_KEY_ID
+# -> AWS_SECRET_ACCESS_KEY
