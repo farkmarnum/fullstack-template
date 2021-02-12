@@ -9,7 +9,8 @@ Parameters:
     Type: String
   HostedZoneId:
     Type: String
-
+  ECRName:
+    Type: String
   EnvironmentName:
     Type: String
     MaxLength: 16
@@ -19,7 +20,7 @@ Parameters:
     Default: 1024
   BackendTaskCPU:
     Type: Number
-    Default: 512
+    Default: 256
   DesiredNumberOfBackendInstances:
     Type: Number
     Default: 1
@@ -28,7 +29,88 @@ Parameters:
     Default: 3000
 
 Resources:
-  # SHARED:
+  VPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: 172.31.0.0/16
+  Subnet1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: us-east-1a
+      CidrBlock: 172.31.1.0/24
+      MapPublicIpOnLaunch: true
+  Subnet2:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: us-east-1b
+      CidrBlock: 172.31.2.0/24
+      MapPublicIpOnLaunch: true
+  Subnet3:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: us-east-1c
+      CidrBlock: 172.31.3.0/24
+      MapPublicIpOnLaunch: true
+  Subnet4:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: us-east-1d
+      CidrBlock: 172.31.4.0/24
+      MapPublicIpOnLaunch: true
+
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join [_, [!Ref 'AWS::StackName']]
+        - Key: Network
+          Value: Public
+  GatewayToInternet:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  PublicRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Network
+          Value: Public
+  PublicRoute:
+    Type: 'AWS::EC2::Route'
+    DependsOn: GatewayToInternet
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref Subnet1
+      RouteTableId: !Ref PublicRouteTable
+  PublicSubnet2RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref Subnet2
+      RouteTableId: !Ref PublicRouteTable
+  PublicSubnet1RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref Subnet3
+      RouteTableId: !Ref PublicRouteTable
+  PublicSubnet2RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref Subnet4
+      RouteTableId: !Ref PublicRouteTable
+
   CloudWatchLogsGroup:
     Type: 'AWS::Logs::LogGroup'
     Properties:
@@ -102,13 +184,13 @@ Resources:
         - DomainName: !GetAtt FrontendS3Bucket.DomainName
           Id: S3Origin
           S3OriginConfig:
-            OriginAccessIdentity: !Ref CloudFrontOriginIdentity
+            OriginAccessIdentity: !Sub 'origin-access-identity/cloudfront/${CloudFrontOriginIdentity}'
         Aliases:
           - !Ref FrontendDomain
         Enabled: 'true'
         DefaultRootObject: index.html
         DefaultCacheBehavior:
-          TargetOriginId: S3
+          TargetOriginId: S3Origin
           ViewerProtocolPolicy: redirect-to-https
           AllowedMethods:
             - GET
@@ -126,6 +208,8 @@ Resources:
           AcmCertificateArn: !Ref DomainCertificateArn
           SslSupportMethod: sni-only
           MinimumProtocolVersion: TLSv1.2_2019
+    DependsOn:
+      - FrontendS3Bucket
 
   FrontendDNSRecord:
     Type: 'AWS::Route53::RecordSetGroup'
@@ -161,7 +245,6 @@ Resources:
           FromPort: !Ref BackendContainerPort
           ToPort: !Ref BackendContainerPort
           SourceSecurityGroupId: !GetAtt BackendLoadBalancerSecurityGroup.GroupId
-    
   BackendTargetGroup:
     Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
     Properties:
@@ -212,7 +295,11 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${EnvironmentName}-be-lb'
-      Subnets: !Ref Subnets
+      Subnets:
+        - !Ref Subnet1
+        - !Ref Subnet2
+        - !Ref Subnet3
+        - !Ref Subnet4
       SecurityGroups:
         - !GetAtt BackendLoadBalancerSecurityGroup.GroupId
 
@@ -226,7 +313,11 @@ Resources:
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
-          Subnets: !Ref Subnets
+          Subnets:
+            - !Ref Subnet1
+            - !Ref Subnet2
+            - !Ref Subnet3
+            - !Ref Subnet4
           SecurityGroups:
             - !GetAtt BackendSecurityGroup.GroupId
       LoadBalancers:
@@ -245,7 +336,7 @@ Resources:
       ContainerDefinitions:
         - Name: !Ref EnvironmentName
           Essential: true
-          Image: !Sub '${AWS::AccountId}.dkr.ecr.us-east-2.amazonaws.com/emojify-backend:${ImagesTag}'
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.us-east-1.amazonaws.com/${ECRName}:${ImagesTag}'
           Environment:
             - Name: PORT
               Value: !Ref BackendContainerPort
@@ -293,5 +384,5 @@ Resources:
       - Name: !Sub 'www.${FrontendDomain}.'
         Type: A
         AliasTarget:
-          HostedZoneId: Z2O1EMRO9K5GLX # https://docs.aws.amazon.com/general/latest/gr/s3.html#s3_website_region_endpoints
-          DNSName: s3-website.us-east-2.amazonaws.com # https://docs.aws.amazon.com/general/latest/gr/s3.html#s3_website_region_endpoints
+          HostedZoneId: Z3AQBSTGFYJSTF # https://docs.aws.amazon.com/general/latest/gr/s3.html#s3_website_region_endpoints
+          DNSName: s3-website.us-east-1.amazonaws.com # https://docs.aws.amazon.com/general/latest/gr/s3.html#s3_website_region_endpoints

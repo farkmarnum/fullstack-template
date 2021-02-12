@@ -4,6 +4,8 @@
 
 1. Clone this repo
 
+2. Run `init.sh` and follow the prompts
+
 2. AWS Setup:
     - Register a domain (`FRONTEND_DOMAIN`) with AWS and get the Hosted Zone Id in Route53 (`HOSTED_ZONE_ID`)
     - Request a certificate for your new domain with an additional wildcard subdomain & get the arn (`CERTIFICATE_ARN`)
